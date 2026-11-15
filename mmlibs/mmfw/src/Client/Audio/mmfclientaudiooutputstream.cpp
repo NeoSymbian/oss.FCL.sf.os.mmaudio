@@ -4,12 +4,12 @@
 // under the terms of "Eclipse Public License v1.0"
 // which accompanies this distribution, and is available
 // at the URL "http://www.eclipse.org/legal/epl-v10.html".
-//
+// SPDX-License-Identifier: EPL-2.0 (changed by the NeoSymbian Authors)
 // Initial Contributors:
 // Nokia Corporation - initial contribution.
 //
 // Contributors:
-//
+// The NeoSymbian Authors (2026): without an audio server the stream constructs and its open fails with KErrNotSupported.
 // Description:
 //
 
@@ -297,9 +297,14 @@ CMMFMdaAudioOutputStream::CMMFMdaAudioOutputStream(MMdaAudioOutputStreamCallback
  */
 void CMMFMdaAudioOutputStream::ConstructL(TInt aPriority, TInt aPref)
 	{
-	iDevSound = CMMFDevSound::NewL();
+	// NeoSymbian: with no audio server (DevSound's open finds none) the stream still constructs, without a device:
+	// Open reports KErrNotSupported through MaoscOpenComplete, as a failed open does, and the getters give neutral
+	// values. Old games create a stream at start-up and leave untrapped otherwise (Frozen Bubble: E32USER-CBase 47).
+	TRAPD(err, iDevSound = CMMFDevSound::NewL());
+	if (err != KErrNotFound)
+		User::LeaveIfError(err);
 	SetPriority(aPriority, aPref);
-	iDevSoundIgnoresUnderflow = iDevSound->QueryIgnoresUnderflow();
+	iDevSoundIgnoresUnderflow = iDevSound && iDevSound->QueryIgnoresUnderflow();
 	iFifo = new(ELeave) CMMFFifo<const TDesC8>();
 	iActiveCallback = new(ELeave) CActiveCallback(iCallback);
 	iActiveSchedulerWait = new(ELeave) CActiveSchedulerWait;
@@ -381,6 +386,11 @@ void CMMFMdaAudioOutputStream::Open(TMdaPackage* aSettings)
 		iValuesCached = ETrue;
 		}
 
+	if (!iDevSound)		// NeoSymbian: no audio server (ConstructL)
+		{
+		InitializeComplete(KErrNotSupported);
+		return;
+		}
 	TRAPD(err, iDevSound->InitializeL(*this, iDataTypeCode, EMMFStatePlaying));
 	if (err != KErrNone)
 		{
@@ -398,6 +408,8 @@ void CMMFMdaAudioOutputStream::Open(TMdaPackage* aSettings)
  */
 TInt CMMFMdaAudioOutputStream::MaxVolume()
 	{
+	if (!iDevSound)
+		return 1;		// NeoSymbian: no device; 1 rather than 0, which callers divide by
 	return iDevSound->MaxVolume();
 	}
 
@@ -411,6 +423,8 @@ TInt CMMFMdaAudioOutputStream::MaxVolume()
  */
 TInt CMMFMdaAudioOutputStream::Volume()
 	{
+	if (!iDevSound)
+		return 0;		// NeoSymbian: no device
 	return iDevSound->Volume();
 	} 
 
@@ -424,7 +438,8 @@ TInt CMMFMdaAudioOutputStream::Volume()
  */
 void CMMFMdaAudioOutputStream::SetVolume(TInt aVolume)
 	{
-	iDevSound->SetVolume(aVolume);
+	if (iDevSound)		// NeoSymbian: nothing to set without a device
+		iDevSound->SetVolume(aVolume);
 	}
 
 /**
@@ -448,7 +463,8 @@ void CMMFMdaAudioOutputStream::SetBalanceL(TInt aBalance)
 	StreamUtils::CalculateLeftRightBalance( left, right, aBalance );
 
 	// send the balance to SoundDevice
-	iDevSound->SetPlayBalanceL(left, right);
+	if (iDevSound)		// NeoSymbian: nothing to set without a device
+		iDevSound->SetPlayBalanceL(left, right);
 	}
 
 /**
@@ -465,7 +481,8 @@ TInt CMMFMdaAudioOutputStream::GetBalanceL() const
 	{
 	TInt rightBalance = 0;
 	TInt leftBalance  = 0;
-	iDevSound->GetPlayBalanceL(leftBalance, rightBalance);
+	if (iDevSound)		// NeoSymbian: centred without a device
+		iDevSound->GetPlayBalanceL(leftBalance, rightBalance);
 	TInt balance  = 0;
 	StreamUtils::CalculateBalance( balance, leftBalance, rightBalance );
 	return balance;
@@ -486,7 +503,8 @@ void CMMFMdaAudioOutputStream::SetPriority(TInt aPriority, TInt aPref)
 	TMMFPrioritySettings settings;
 	settings.iPriority = aPriority;
 	settings.iPref = aPref;
-	iDevSound->SetPrioritySettings(settings);
+	if (iDevSound)		// NeoSymbian: nothing to set without a device
+		iDevSound->SetPrioritySettings(settings);
 	}
 
 /**
@@ -501,7 +519,7 @@ void CMMFMdaAudioOutputStream::SetPriority(TInt aPriority, TInt aPref)
  */
 void CMMFMdaAudioOutputStream::WriteL(const TDesC8& aData)
 	{
-	if(iState==EStopping)
+	if(iState==EStopping || !iDevSound)		// NeoSymbian: never open without a device
 		{
 		User::Leave(KErrNotReady);
 		}
@@ -671,6 +689,11 @@ TInt CMMFMdaAudioOutputStream::Resume()
  */
 const TTimeIntervalMicroSeconds& CMMFMdaAudioOutputStream::Position()
 	{
+	if (!iDevSound)		// NeoSymbian: nothing played without a device
+		{
+		iPosition = 0;
+		return iPosition;
+		}
 	TInt64 position = iDevSound->SamplesPlayed();
 	position = position * KMicroSecsInOneSec / StreamUtils::SampleRateAsValue(iDevSound->Config());
 	iPosition = (iState == EPlaying || iState == EStopping || iState == EPaused) ? position : 0; // Shouldn't need to check for playing but CMMFDevSound doesn't reset bytes played after a stop
@@ -685,6 +708,8 @@ const TTimeIntervalMicroSeconds& CMMFMdaAudioOutputStream::Position()
  */
 TInt CMMFMdaAudioOutputStream::GetBytes()
 	{
+	if (!iDevSound)
+		return 0;		// NeoSymbian: nothing played without a device
 	return iDevSound->SamplesPlayed() * StreamUtils::BytesPerSample(iDevSound->Config());
 	}
 
@@ -698,6 +723,8 @@ void CMMFMdaAudioOutputStream::SetDataTypeL(TFourCC aAudioType)
 
 	if(aAudioType == iDataTypeCode)
 		return;
+	if (!iDevSound)
+		User::Leave(KErrNotSupported);	// NeoSymbian: no device to ask
 
 	TMMFPrioritySettings prioritySettings; 	
 	prioritySettings.iState = EMMFStatePlaying;
@@ -762,6 +789,8 @@ TFourCC CMMFMdaAudioOutputStream::DataType() const
 TInt CMMFMdaAudioOutputStream::RegisterAudioResourceNotification(MMMFAudioResourceNotificationCallback& aCallback,TUid aNotificationEventUid,const TDesC8& aNotificationRegistrationData)
 	{
 	iAudioResourceNotificationCallBack = &aCallback;
+	if (!iDevSound)
+		return KErrNotSupported;	// NeoSymbian: no device
 	TInt err = iDevSound->RegisterAsClient(aNotificationEventUid,aNotificationRegistrationData);
 	if(err == KErrNotReady)
 		{
@@ -776,6 +805,8 @@ TInt CMMFMdaAudioOutputStream::RegisterAudioResourceNotification(MMMFAudioResour
 
 TInt CMMFMdaAudioOutputStream::CancelRegisterAudioResourceNotification(TUid aNotificationEventId)
 	{
+	if (!iDevSound)
+		return KErrNotSupported;	// NeoSymbian: no device
 	TInt err = iDevSound->CancelRegisterAsClient(aNotificationEventId);
 	if(err == KErrNotReady)
 		{
@@ -796,6 +827,8 @@ TInt CMMFMdaAudioOutputStream::CancelRegisterAudioResourceNotification(TUid aNot
 	
 TInt CMMFMdaAudioOutputStream::WillResumePlay()
 	{
+	if (!iDevSound)
+		return KErrNotSupported;	// NeoSymbian: no device
 	return iDevSound->WillResumePlay();
 	}
 
@@ -1086,6 +1119,8 @@ void CMMFMdaAudioOutputStream::DeviceMessage(TUid /*aMessageType*/, const TDesC8
 // CustomInferface - just pass on to DevSound. 
 TAny* CMMFMdaAudioOutputStream::CustomInterface(TUid aInterfaceId)
 	{
+	if (!iDevSound)
+		return NULL;	// NeoSymbian: no device
 	return iDevSound->CustomInterface(aInterfaceId);
 	}
 	
