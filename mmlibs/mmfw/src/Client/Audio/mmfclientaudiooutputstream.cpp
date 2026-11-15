@@ -481,8 +481,10 @@ TInt CMMFMdaAudioOutputStream::GetBalanceL() const
 	{
 	TInt rightBalance = 0;
 	TInt leftBalance  = 0;
-	if (iDevSound)		// NeoSymbian: centred without a device
+	if (iDevSound)
 		iDevSound->GetPlayBalanceL(leftBalance, rightBalance);
+	else
+		leftBalance = rightBalance = 50;	// NeoSymbian: centred without a device
 	TInt balance  = 0;
 	StreamUtils::CalculateBalance( balance, leftBalance, rightBalance );
 	return balance;
